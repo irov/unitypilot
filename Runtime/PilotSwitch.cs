@@ -15,6 +15,19 @@ namespace Pilot.SDK
         public PilotSwitch DefaultValue(bool value) { Put("defaultValue", value); return this; }
 
         /// <summary>
+        /// Register a typed change handler that auto-acknowledges after the callback completes.
+        /// </summary>
+        public PilotSwitch OnChange(Action<PilotSwitchAction> callback)
+        {
+            m_ui.RegisterCallback(m_internalId, action =>
+            {
+                callback(new PilotSwitchAction(action));
+                PilotSDK.AcknowledgeAction(action.Id);
+            });
+            return this;
+        }
+
+        /// <summary>
         /// Register a change handler that auto-acknowledges after the callback completes.
         /// </summary>
         public PilotSwitch OnChange(Action<PilotAction> callback)

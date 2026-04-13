@@ -30,6 +30,19 @@ namespace Pilot.SDK
         public PilotSelect DefaultValue(string value) { Put("defaultValue", value); return this; }
 
         /// <summary>
+        /// Register a typed change handler that auto-acknowledges after the callback completes.
+        /// </summary>
+        public PilotSelect OnChange(System.Action<PilotSelectAction> callback)
+        {
+            m_ui.RegisterCallback(m_internalId, action =>
+            {
+                callback(new PilotSelectAction(action));
+                PilotSDK.AcknowledgeAction(action.Id);
+            });
+            return this;
+        }
+
+        /// <summary>
         /// Register a change handler that auto-acknowledges after the callback completes.
         /// </summary>
         public PilotSelect OnChange(System.Action<PilotAction> callback)

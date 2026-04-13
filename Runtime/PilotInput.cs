@@ -17,6 +17,19 @@ namespace Pilot.SDK
         public PilotInput Placeholder(string placeholder) { Put("placeholder", placeholder); return this; }
 
         /// <summary>
+        /// Register a typed submit handler that auto-acknowledges after the callback completes.
+        /// </summary>
+        public PilotInput OnSubmit(Action<PilotInputAction> callback)
+        {
+            m_ui.RegisterCallback(m_internalId, action =>
+            {
+                callback(new PilotInputAction(action));
+                PilotSDK.AcknowledgeAction(action.Id);
+            });
+            return this;
+        }
+
+        /// <summary>
         /// Register a submit handler that auto-acknowledges after the callback completes.
         /// </summary>
         public PilotInput OnSubmit(Action<PilotAction> callback)

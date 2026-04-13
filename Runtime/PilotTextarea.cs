@@ -16,6 +16,19 @@ namespace Pilot.SDK
         public PilotTextarea DefaultValue(string value) { Put("defaultValue", value); return this; }
 
         /// <summary>
+        /// Register a typed submit handler that auto-acknowledges after the callback completes.
+        /// </summary>
+        public PilotTextarea OnSubmit(Action<PilotTextareaAction> callback)
+        {
+            m_ui.RegisterCallback(m_internalId, action =>
+            {
+                callback(new PilotTextareaAction(action));
+                PilotSDK.AcknowledgeAction(action.Id);
+            });
+            return this;
+        }
+
+        /// <summary>
         /// Register a submit handler that auto-acknowledges after the callback completes.
         /// </summary>
         public PilotTextarea OnSubmit(Action<PilotAction> callback)

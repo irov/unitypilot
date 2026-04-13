@@ -80,8 +80,7 @@ Boolean toggle:
 root.AddSwitch("God mode")
     .DefaultValue(false)
     .OnChange(action => {
-        bool on = action.Payload?.GetBool("value") ?? false;
-        game.SetGodMode(on);
+        game.SetGodMode(action.Value);
     });
 ```
 
@@ -95,8 +94,7 @@ root.AddInput("Command")
     .Placeholder("type a command…")
     .DefaultValue("")
     .OnSubmit(action => {
-        string text = action.Payload?.GetString("value");
-        ExecuteCommand(text);
+        ExecuteCommand(action.Value);
     });
 ```
 
@@ -113,8 +111,7 @@ root.AddSelect("Level")
     })
     .DefaultValue("1")
     .OnChange(action => {
-        string level = action.Payload?.GetString("value");
-        LoadLevel(level);
+        LoadLevel(action.Value);
     });
 ```
 
@@ -127,8 +124,7 @@ root.AddTextarea("Notes")
     .Rows(4)
     .DefaultValue("")
     .OnSubmit(action => {
-        string text = action.Payload?.GetString("value");
-        SaveNotes(text);
+        SaveNotes(action.Value);
     });
 ```
 
