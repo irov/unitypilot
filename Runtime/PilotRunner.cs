@@ -21,7 +21,7 @@ namespace Pilot.SDK
             if (s_instance != null) return;
 
             var go = new GameObject("[PilotSDK]");
-            Object.DontDestroyOnLoad(go);
+            UnityEngine.Object.DontDestroyOnLoad(go);
             go.hideFlags = HideFlags.HideAndDontSave;
             s_instance = go.AddComponent<PilotRunner>();
         }
