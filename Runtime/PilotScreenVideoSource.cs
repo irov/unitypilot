@@ -1,5 +1,6 @@
 #if PILOT_LIVEKIT
 using LiveKit;
+using LiveKit.Proto;
 using UnityEngine;
 
 namespace Pilot.SDK
