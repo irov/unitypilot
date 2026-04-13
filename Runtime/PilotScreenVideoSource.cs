@@ -1,100 +1,131 @@
 #if PILOT_LIVEKIT
-using System.Collections;
+using System;
 using LiveKit;
+using LiveKit.Proto;
+using Unity.Collections;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 
 namespace Pilot.SDK
 {
     /// <summary>
-    /// Captures the game camera output (not the full Game View / Device Simulator chrome)
-    /// by rendering Camera.main into a dedicated RenderTexture each frame.
+    /// Captures the game screen via ScreenCapture.CaptureScreenshotIntoRenderTexture
+    /// using a RenderTexture sized to maxDimension (not Screen.width/height which
+    /// returns the simulated resolution in Device Simulator).
+    /// ScreenCapture automatically downscales to the RT size when the RT is smaller
+    /// than the actual screen.
+    /// Extends RtcVideoSource directly to control Init() timing.
     /// </summary>
-    internal sealed class PilotScreenVideoSource : TextureVideoSource
+    internal sealed class PilotScreenVideoSource : RtcVideoSource
     {
-        private readonly RenderTexture m_renderTexture;
-        private readonly Camera m_camera;
+        private readonly int m_width;
+        private readonly int m_height;
+        private TextureFormat m_textureFormat;
+        private RenderTexture m_renderTexture;
 
         internal PilotScreenVideoSource(int maxDimension)
-            : this(ResolveCamera(), maxDimension)
+            : base(VideoStreamSource.Screen, VideoBufferType.Rgba)
         {
+            ComputeDimensions(maxDimension, out m_width, out m_height);
+            base.Init();
         }
 
-        private PilotScreenVideoSource(Camera camera, int maxDimension)
-            : base(CreateRenderTexture(camera, maxDimension))
+        public override int GetWidth()
         {
-            m_camera = camera;
-            m_renderTexture = (RenderTexture)Texture;
+            return m_width;
         }
 
-        internal new IEnumerator Update()
+        public override int GetHeight()
         {
-            while (true)
-            {
-                yield return new WaitForEndOfFrame();
+            return m_height;
+        }
 
-                if (m_camera == null)
-                    continue;
-
-                var prev = m_camera.targetTexture;
-                m_camera.targetTexture = m_renderTexture;
-                m_camera.Render();
-                m_camera.targetTexture = prev;
-            }
+        protected override VideoRotation GetVideoRotation()
+        {
+            return VideoRotation._0;
         }
 
         public override void Stop()
         {
             base.Stop();
+            ClearRenderTexture();
+        }
 
+        ~PilotScreenVideoSource()
+        {
+            Dispose(false);
+            ClearRenderTexture();
+        }
+
+        private void ClearRenderTexture()
+        {
             if (m_renderTexture != null)
             {
                 m_renderTexture.Release();
+                m_renderTexture = null;
             }
         }
 
-        private static Camera ResolveCamera()
+        protected override bool ReadBuffer()
         {
+            if (_reading)
+                return false;
+            _reading = true;
+            var textureChanged = false;
+
+            try
+            {
+                if (m_renderTexture == null || m_renderTexture.width != m_width || m_renderTexture.height != m_height)
+                {
+                    ClearRenderTexture();
+
+                    var targetFormat = Utils.GetSupportedGraphicsFormat(SystemInfo.graphicsDeviceType);
+                    var compatibleFormat = SystemInfo.GetCompatibleFormat(targetFormat, FormatUsage.ReadPixels);
+                    m_textureFormat = GraphicsFormatUtility.GetTextureFormat(compatibleFormat);
+                    _bufferType = GetVideoBufferType(m_textureFormat);
+                    m_renderTexture = new RenderTexture(m_width, m_height, 0, compatibleFormat);
+                    _captureBuffer = new NativeArray<byte>(m_width * m_height * GetStrideForBuffer(_bufferType), Allocator.Persistent);
+                    _previewTexture = new Texture2D(m_width, m_height, m_textureFormat, false);
+                    textureChanged = true;
+                }
+
+                ScreenCapture.CaptureScreenshotIntoRenderTexture(m_renderTexture);
+                Graphics.CopyTexture(m_renderTexture, _previewTexture);
+                AsyncGPUReadback.RequestIntoNativeArray(ref _captureBuffer, m_renderTexture, 0, m_textureFormat, OnReadback);
+            }
+            catch (Exception e)
+            {
+                Utils.Error(e);
+                _reading = false;
+            }
+
+            return textureChanged;
+        }
+
+        private static void ComputeDimensions(int maxDimension, out int width, out int height)
+        {
+            // Use camera aspect ratio — it reflects the actual game viewport
+            // regardless of Device Simulator frame
             var cam = Camera.main;
-            if (cam == null)
-            {
-                cam = Camera.current;
-            }
-            if (cam == null && Camera.allCamerasCount > 0)
-            {
-                var cameras = Camera.allCameras;
-                cam = cameras[0];
-            }
-            return cam;
-        }
+            float aspect = cam != null
+                ? (float)cam.pixelWidth / cam.pixelHeight
+                : (float)Screen.width / Screen.height;
 
-        private static RenderTexture CreateRenderTexture(Camera camera, int maxDimension)
-        {
-            int width, height;
-
-            if (camera != null)
+            if (aspect >= 1f)
             {
-                width = camera.pixelWidth;
-                height = camera.pixelHeight;
+                width = maxDimension;
+                height = Mathf.Max(2, Mathf.RoundToInt(maxDimension / aspect));
             }
             else
             {
-                width = Screen.width;
-                height = Screen.height;
-            }
-
-            if (maxDimension > 0)
-            {
-                float scale = Mathf.Min(1f, (float)maxDimension / Mathf.Max(width, height));
-                width = Mathf.Max(2, Mathf.RoundToInt(width * scale));
-                height = Mathf.Max(2, Mathf.RoundToInt(height * scale));
+                height = maxDimension;
+                width = Mathf.Max(2, Mathf.RoundToInt(maxDimension * aspect));
             }
 
             // Ensure even dimensions for video encoding
             width = (width / 2) * 2;
             height = (height / 2) * 2;
-
-            return new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32);
         }
     }
 }
