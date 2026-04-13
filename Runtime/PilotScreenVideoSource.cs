@@ -1,54 +1,57 @@
 #if PILOT_LIVEKIT
 using LiveKit;
-using LiveKit.Proto;
 using UnityEngine;
+using UnityEngine.Rendering;
 
 namespace Pilot.SDK
 {
     /// <summary>
-    /// Overrides ScreenVideoSource to use maxDimension-based RT sizing
-    /// instead of Screen.width/height (which returns simulated resolution
-    /// in Device Simulator). ScreenCapture auto-downscales to the RT size.
-    ///
-    /// Uses a static field to pass dimensions before the base constructor
-    /// calls GetWidth()/GetHeight() via Init().
+    /// Captures the camera output via URP's endCameraRendering callback,
+    /// blitting CameraTarget into a small RenderTexture.
+    /// This bypasses ScreenCapture which in the editor captures the full
+    /// Game View including Device Simulator chrome.
+    /// Uses TextureVideoSource so LiveKit reads from our RT each frame.
     /// </summary>
-    internal sealed class PilotScreenVideoSource : ScreenVideoSource
+    internal sealed class PilotScreenVideoSource : TextureVideoSource
     {
-        // Thread-confined to main thread (Unity API), so static is safe here.
-        private static int s_pendingWidth;
-        private static int s_pendingHeight;
-
-        private readonly int m_width;
-        private readonly int m_height;
+        private readonly RenderTexture m_captureRT;
 
         internal PilotScreenVideoSource(int maxDimension)
-            : base(Prepare(maxDimension))
+            : base(CreateRT(maxDimension))
         {
-            m_width = s_pendingWidth;
-            m_height = s_pendingHeight;
+            m_captureRT = (RenderTexture)Texture;
+            RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
         }
 
-        /// <summary>
-        /// Computes dimensions and stores them in static fields before the base
-        /// constructor runs Init() → GetWidth()/GetHeight().
-        /// Returns the buffer type to pass through to base(bufferType).
-        /// </summary>
-        private static VideoBufferType Prepare(int maxDimension)
+        private void OnEndCameraRendering(ScriptableRenderContext ctx, Camera cam)
         {
-            ComputeDimensions(maxDimension, out s_pendingWidth, out s_pendingHeight);
-            return VideoBufferType.Rgba;
+            if (cam != Camera.main)
+                return;
+
+            var cmd = new CommandBuffer();
+            cmd.name = "PilotCapture";
+            cmd.Blit(BuiltinRenderTextureType.CameraTarget, m_captureRT);
+            ctx.ExecuteCommandBuffer(cmd);
+            ctx.Submit();
+            cmd.Dispose();
         }
 
-        public override int GetWidth()
+        public override void Stop()
         {
-            // During base constructor: m_width is 0, use s_pendingWidth
-            return m_width != 0 ? m_width : s_pendingWidth;
+            RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
+            base.Stop();
+
+            if (m_captureRT != null)
+            {
+                m_captureRT.Release();
+            }
         }
 
-        public override int GetHeight()
+        private static RenderTexture CreateRT(int maxDimension)
         {
-            return m_height != 0 ? m_height : s_pendingHeight;
+            int width, height;
+            ComputeDimensions(maxDimension, out width, out height);
+            return new RenderTexture(width, height, 0, RenderTextureFormat.ARGB32);
         }
 
         private static void ComputeDimensions(int maxDimension, out int width, out int height)
