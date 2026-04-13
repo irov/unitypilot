@@ -1,0 +1,22 @@
+{
+    "name": "Pilot.SDK",
+    "rootNamespace": "Pilot.SDK",
+    "references": [
+        "LiveKit"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "io.livekit.livekit-sdk",
+            "expression": "",
+            "define": "PILOT_LIVEKIT"
+        }
+    ],
+    "noEngineReferences": false
+}

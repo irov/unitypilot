@@ -1,0 +1,21 @@
+{
+  "name": "com.pilot.sdk",
+  "version": "1.0.0",
+  "displayName": "Pilot SDK",
+  "description": "Remote debug panel, logging, metrics, and live streaming for Unity applications.",
+  "unity": "2020.3",
+  "keywords": [
+    "pilot",
+    "debug",
+    "remote",
+    "logging",
+    "metrics",
+    "live",
+    "streaming"
+  ],
+  "author": {
+    "name": "Pilot"
+  },
+  "license": "MIT",
+  "dependencies": {}
+}
