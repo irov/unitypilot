@@ -272,7 +272,13 @@ namespace Pilot.SDK
             }
 
 #if PILOT_LIVEKIT
-            m_publisher.Stop();
+            var wait = new ManualResetEventSlim(false);
+            PilotRunner.RunOnMainThread(() =>
+            {
+                try { m_publisher.Stop(); } catch { }
+                wait.Set();
+            });
+            wait.Wait(TimeSpan.FromSeconds(5));
 #endif
 
             if (m_overlayView != null)
@@ -288,13 +294,17 @@ namespace Pilot.SDK
             Exception result = null;
             var wait = new ManualResetEventSlim(false);
 
-            m_publisher.Start(serverUrl, token, presetName, maxDimension, framesPerSecond, (error) =>
+            PilotRunner.RunOnMainThread(() =>
             {
-                result = error;
-                wait.Set();
+                m_publisher.Start(serverUrl, token, presetName, maxDimension, framesPerSecond, (error) =>
+                {
+                    result = error;
+                    wait.Set();
+                });
             });
 
-            wait.Wait(TimeSpan.FromSeconds(15));
+            if (!wait.Wait(TimeSpan.FromSeconds(15)))
+                return new PilotException("LiveKit start timed out");
             return result;
 #else
             return new PilotException("LiveKit is not available (PILOT_LIVEKIT not defined)");
@@ -307,13 +317,17 @@ namespace Pilot.SDK
             Exception result = null;
             var wait = new ManualResetEventSlim(false);
 
-            m_publisher.EnableScreenShare((error) =>
+            PilotRunner.RunOnMainThread(() =>
             {
-                result = error;
-                wait.Set();
+                m_publisher.EnableScreenShare((error) =>
+                {
+                    result = error;
+                    wait.Set();
+                });
             });
 
-            wait.Wait(TimeSpan.FromSeconds(15));
+            if (!wait.Wait(TimeSpan.FromSeconds(15)))
+                return new PilotException("Screen share enable timed out");
             return result;
 #else
             return new PilotException("LiveKit is not available (PILOT_LIVEKIT not defined)");
@@ -327,14 +341,21 @@ namespace Pilot.SDK
             bool resultActive = false;
             var wait = new ManualResetEventSlim(false);
 
-            m_publisher.UpdateQuality(presetName, maxDimension, framesPerSecond, (active, error) =>
+            PilotRunner.RunOnMainThread(() =>
             {
-                resultActive = active;
-                resultError = error;
-                wait.Set();
+                m_publisher.UpdateQuality(presetName, maxDimension, framesPerSecond, (active, error) =>
+                {
+                    resultActive = active;
+                    resultError = error;
+                    wait.Set();
+                });
             });
 
-            wait.Wait(TimeSpan.FromSeconds(15));
+            if (!wait.Wait(TimeSpan.FromSeconds(15)))
+            {
+                screenShareActive = false;
+                return new PilotException("LiveKit quality update timed out");
+            }
             screenShareActive = resultActive;
             return resultError;
 #else
