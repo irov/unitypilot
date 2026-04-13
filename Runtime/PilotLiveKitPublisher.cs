@@ -78,7 +78,7 @@ namespace Pilot.SDK
             PilotScreenVideoSource source;
             try
             {
-                source = new PilotScreenVideoSource();
+                source = new PilotScreenVideoSource(quality.MaxDimension);
             }
             catch (Exception e)
             {
