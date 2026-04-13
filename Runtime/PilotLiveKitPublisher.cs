@@ -152,7 +152,7 @@ namespace Pilot.SDK
             Action<bool, Exception> onComplete)
         {
             LocalVideoTrack oldTrack;
-            ScreenVideoSource oldSource;
+            PilotScreenVideoSource oldSource;
 
             lock (m_lock)
             {
