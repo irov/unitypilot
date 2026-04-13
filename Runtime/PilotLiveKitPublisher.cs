@@ -14,7 +14,7 @@ namespace Pilot.SDK
     {
         private Room m_room;
         private LocalVideoTrack m_screenTrack;
-        private ScreenVideoSource m_screenSource;
+        private PilotScreenVideoSource m_screenSource;
         private LiveQuality m_currentQuality = LiveQuality.Default();
         private readonly object m_lock = new object();
 
@@ -75,10 +75,10 @@ namespace Pilot.SDK
 
         private IEnumerator DoEnableScreenShare(Room room, LiveQuality quality, Action<Exception> onComplete)
         {
-            ScreenVideoSource source;
+            PilotScreenVideoSource source;
             try
             {
-                source = new ScreenVideoSource();
+                source = new PilotScreenVideoSource();
             }
             catch (Exception e)
             {
