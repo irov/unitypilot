@@ -14,7 +14,7 @@ namespace Pilot.SDK
     {
         private Room m_room;
         private LocalVideoTrack m_screenTrack;
-        private PilotScreenVideoSource m_screenSource;
+        private RtcVideoSource m_screenSource;
         private LiveQuality m_currentQuality = LiveQuality.Default();
         private readonly object m_lock = new object();
 
@@ -75,10 +75,10 @@ namespace Pilot.SDK
 
         private IEnumerator DoEnableScreenShare(Room room, LiveQuality quality, Action<Exception> onComplete)
         {
-            PilotScreenVideoSource source;
+            RtcVideoSource source;
             try
             {
-                source = new PilotScreenVideoSource(quality.MaxDimension);
+                source = CreateVideoSource(quality.MaxDimension);
             }
             catch (Exception e)
             {
@@ -152,7 +152,7 @@ namespace Pilot.SDK
             Action<bool, Exception> onComplete)
         {
             LocalVideoTrack oldTrack;
-            PilotScreenVideoSource oldSource;
+            RtcVideoSource oldSource;
 
             lock (m_lock)
             {
@@ -203,6 +203,15 @@ namespace Pilot.SDK
             }
 
             PilotRunner.Instance.StartCoroutine(DoEnableScreenShare(room, quality, onComplete));
+        }
+
+        private static RtcVideoSource CreateVideoSource(int maxDimension)
+        {
+#if UNITY_EDITOR
+            return new PilotEditorCameraVideoSource(maxDimension);
+#else
+            return new PilotScreenVideoSource(maxDimension);
+#endif
         }
 
         internal void Stop()
