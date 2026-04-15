@@ -1,6 +1,5 @@
 #if PILOT_LIVEKIT && UNITY_EDITOR
 using System;
-using System.Collections;
 using System.Reflection;
 using LiveKit;
 using UnityEngine;
@@ -12,16 +11,15 @@ namespace Pilot.SDK
     /// <summary>
     /// Uses a manually rendered game camera to feed a RenderTexture into LiveKit's
     /// standard TextureVideoSource pipeline. This avoids Simulator chrome in the Editor.
+    /// Capture happens inside ReadBuffer() so it is always in sync with the readback.
     /// </summary>
     internal sealed class PilotEditorCameraVideoSource : TextureVideoSource
     {
-        private static readonly WaitForEndOfFrame s_waitForEndOfFrame = new WaitForEndOfFrame();
         private static readonly PropertyInfo s_renderTypeProp;
 
         private readonly RenderTexture m_cameraRT;
         private readonly RenderTexture m_outputRT;
         private Camera m_baseCamera;
-        private Coroutine m_captureCoroutine;
 
         static PilotEditorCameraVideoSource()
         {
@@ -41,24 +39,8 @@ namespace Pilot.SDK
             m_cameraRT = CreateCameraRT(maxDimension);
         }
 
-        public override void Start()
-        {
-            base.Start();
-
-            if (PilotRunner.Instance != null && m_captureCoroutine == null)
-            {
-                m_captureCoroutine = PilotRunner.Instance.StartCoroutine(CaptureLoop());
-            }
-        }
-
         public override void Stop()
         {
-            if (m_captureCoroutine != null && PilotRunner.Instance != null)
-            {
-                PilotRunner.Instance.StopCoroutine(m_captureCoroutine);
-                m_captureCoroutine = null;
-            }
-
             base.Stop();
 
             if (m_cameraRT != null)
@@ -72,32 +54,25 @@ namespace Pilot.SDK
             }
         }
 
-        private IEnumerator CaptureLoop()
+        protected override bool ReadBuffer()
         {
-            while (_playing)
+            if (_reading)
             {
-                yield return s_waitForEndOfFrame;
-
-                var baseCamera = ResolveBaseCamera();
-                if (baseCamera == null)
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var previousTarget = baseCamera.targetTexture;
-                    baseCamera.targetTexture = m_cameraRT;
-                    baseCamera.Render();
-                    baseCamera.targetTexture = previousTarget;
-
-                    Graphics.Blit(m_cameraRT, m_outputRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
-                }
-                catch (Exception e)
-                {
-                    PilotLog.Error("PilotEditorCameraVideoSource capture failed", e);
-                }
+                return false;
             }
+
+            var baseCamera = ResolveBaseCamera();
+            if (baseCamera != null)
+            {
+                var previousTarget = baseCamera.targetTexture;
+                baseCamera.targetTexture = m_cameraRT;
+                baseCamera.Render();
+                baseCamera.targetTexture = previousTarget;
+
+                Graphics.Blit(m_cameraRT, m_outputRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
+            }
+
+            return base.ReadBuffer();
         }
 
         private Camera ResolveBaseCamera()
