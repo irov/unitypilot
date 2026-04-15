@@ -2,6 +2,7 @@
 using System;
 using System.Reflection;
 using LiveKit;
+using Unity.Collections;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
@@ -9,9 +10,10 @@ using UnityEngine.Rendering;
 namespace Pilot.SDK
 {
     /// <summary>
-    /// Uses a manually rendered game camera to feed a RenderTexture into LiveKit's
-    /// standard TextureVideoSource pipeline. This avoids Simulator chrome in the Editor.
-    /// Capture happens inside ReadBuffer() so it is always in sync with the readback.
+    /// Uses a manually rendered game camera to feed frames into LiveKit.
+    /// Avoids Simulator chrome by rendering a specific game camera.
+    /// Uses synchronous ReadPixels instead of AsyncGPUReadback to avoid
+    /// readback callbacks silently stopping in the Editor.
     /// </summary>
     internal sealed class PilotEditorCameraVideoSource : TextureVideoSource
     {
@@ -54,6 +56,8 @@ namespace Pilot.SDK
             }
         }
 
+        // Bypass TextureVideoSource.ReadBuffer (AsyncGPUReadback) entirely.
+        // Do synchronous Camera.Render → Blit → ReadPixels → copy to _captureBuffer.
         protected override bool ReadBuffer()
         {
             if (_reading)
@@ -62,17 +66,60 @@ namespace Pilot.SDK
             }
 
             var baseCamera = ResolveBaseCamera();
-            if (baseCamera != null)
+            if (baseCamera == null)
             {
-                var previousTarget = baseCamera.targetTexture;
-                baseCamera.targetTexture = m_cameraRT;
-                baseCamera.Render();
-                baseCamera.targetTexture = previousTarget;
-
-                Graphics.Blit(m_cameraRT, m_outputRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
+                return false;
             }
 
-            return base.ReadBuffer();
+            _reading = true;
+            var textureChanged = false;
+
+            // Ensure preview texture and native buffer exist
+            if (_previewTexture == null || _previewTexture.width != GetWidth() || _previewTexture.height != GetHeight())
+            {
+                var compatibleFormat = SystemInfo.GetCompatibleFormat(m_outputRT.graphicsFormat, FormatUsage.ReadPixels);
+                var textureFormat = GraphicsFormatUtility.GetTextureFormat(compatibleFormat);
+                _bufferType = GetVideoBufferType(textureFormat);
+
+                if (_captureBuffer.IsCreated)
+                {
+                    _captureBuffer.Dispose();
+                }
+
+                _captureBuffer = new NativeArray<byte>(GetWidth() * GetHeight() * GetStrideForBuffer(_bufferType), Allocator.Persistent);
+
+                if (_previewTexture != null)
+                {
+                    UnityEngine.Object.Destroy(_previewTexture);
+                }
+
+                _previewTexture = new Texture2D(GetWidth(), GetHeight(), textureFormat, false);
+                textureChanged = true;
+            }
+
+            // Render camera → cameraRT
+            var previousTarget = baseCamera.targetTexture;
+            baseCamera.targetTexture = m_cameraRT;
+            baseCamera.Render();
+            baseCamera.targetTexture = previousTarget;
+
+            // Flip Y → outputRT
+            Graphics.Blit(m_cameraRT, m_outputRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
+
+            // Synchronous readback: outputRT → previewTexture → captureBuffer
+            var prevActive = RenderTexture.active;
+            RenderTexture.active = m_outputRT;
+            _previewTexture.ReadPixels(new Rect(0, 0, GetWidth(), GetHeight()), 0, 0, false);
+            _previewTexture.Apply(false);
+            RenderTexture.active = prevActive;
+
+            var raw = _previewTexture.GetRawTextureData<byte>();
+            NativeArray<byte>.Copy(raw, _captureBuffer, raw.Length);
+
+            // Signal SendFrame() that data is ready
+            _requestPending = true;
+
+            return textureChanged;
         }
 
         private Camera ResolveBaseCamera()
