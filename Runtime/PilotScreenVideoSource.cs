@@ -1,146 +1,65 @@
 #if PILOT_LIVEKIT
-using System;
-using System.Collections.Generic;
-using System.Reflection;
+using System.Collections;
 using LiveKit;
 using UnityEngine;
-using UnityEngine.Rendering;
-using UnityEngine.SceneManagement;
 
 namespace Pilot.SDK
 {
     /// <summary>
-    /// Captures the final URP game frame through CameraCaptureBridge.
-    /// This hooks into URP's built-in capture pass, which runs on the final
-    /// resolved output of the last camera in the stack, avoiding Device
-    /// Simulator editor chrome and camera stack ordering issues.
+    /// Captures the final composited game frame using ScreenCapture.CaptureScreenshotIntoRenderTexture
+    /// at WaitForEndOfFrame. This works with any render pipeline and camera configuration.
     /// </summary>
     internal sealed class PilotScreenVideoSource : TextureVideoSource
     {
-        private static readonly Type s_cameraCaptureBridgeType =
-            Type.GetType("UnityEngine.Rendering.CameraCaptureBridge, Unity.RenderPipelines.Core.Runtime");
-
-        private static readonly MethodInfo s_addCaptureActionMethod =
-            s_cameraCaptureBridgeType?.GetMethod("AddCaptureAction", BindingFlags.Public | BindingFlags.Static);
-
-        private static readonly MethodInfo s_removeCaptureActionMethod =
-            s_cameraCaptureBridgeType?.GetMethod("RemoveCaptureAction", BindingFlags.Public | BindingFlags.Static);
-
-        private readonly RenderTexture m_captureRT;
-        private readonly HashSet<Camera> m_registeredCameras = new HashSet<Camera>();
-        private readonly Action<RenderTargetIdentifier, CommandBuffer> m_captureAction;
-        private readonly Material m_copyMaterial;
+        private RenderTexture m_captureRT;
+        private Coroutine m_captureCoroutine;
 
         internal PilotScreenVideoSource(int maxDimension)
             : base(CreateRT(maxDimension))
         {
             m_captureRT = (RenderTexture)Texture;
-            m_captureAction = CaptureFrame;
-            m_copyMaterial = CreateCopyMaterial();
+        }
 
-            RefreshRegisteredCameras();
+        public override void Start()
+        {
+            base.Start();
 
-            SceneManager.sceneLoaded += OnSceneLoaded;
-            SceneManager.activeSceneChanged += OnActiveSceneChanged;
+            if (PilotRunner.Instance != null)
+            {
+                m_captureCoroutine = PilotRunner.Instance.StartCoroutine(CaptureLoop());
+            }
         }
 
         public override void Stop()
         {
-            SceneManager.sceneLoaded -= OnSceneLoaded;
-            SceneManager.activeSceneChanged -= OnActiveSceneChanged;
+            if (m_captureCoroutine != null && PilotRunner.Instance != null)
+            {
+                PilotRunner.Instance.StopCoroutine(m_captureCoroutine);
+                m_captureCoroutine = null;
+            }
 
-            UnregisterAllCameras();
             base.Stop();
 
             if (m_captureRT != null)
             {
                 m_captureRT.Release();
-            }
-
-            if (m_copyMaterial != null)
-            {
-                UnityEngine.Object.Destroy(m_copyMaterial);
+                m_captureRT = null;
             }
         }
 
-        private void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        private IEnumerator CaptureLoop()
         {
-            RefreshRegisteredCameras();
-        }
+            var waitEndOfFrame = new WaitForEndOfFrame();
 
-        private void OnActiveSceneChanged(Scene current, Scene next)
-        {
-            RefreshRegisteredCameras();
-        }
-
-        private void RefreshRegisteredCameras()
-        {
-            if (s_addCaptureActionMethod == null)
+            while (true)
             {
-                PilotLog.Warn("CameraCaptureBridge is unavailable. Live capture requires URP camera capture support.");
-                return;
-            }
+                yield return waitEndOfFrame;
 
-            foreach (var camera in Resources.FindObjectsOfTypeAll<Camera>())
-            {
-                if (camera == null || camera.cameraType != CameraType.Game)
+                if (m_captureRT != null)
                 {
-                    continue;
+                    ScreenCapture.CaptureScreenshotIntoRenderTexture(m_captureRT);
                 }
-
-                if (!camera.gameObject.scene.IsValid())
-                {
-                    continue;
-                }
-
-                if (!m_registeredCameras.Add(camera))
-                {
-                    continue;
-                }
-
-                s_addCaptureActionMethod.Invoke(null, new object[] { camera, m_captureAction });
             }
-        }
-
-        private void UnregisterAllCameras()
-        {
-            if (s_removeCaptureActionMethod == null)
-            {
-                m_registeredCameras.Clear();
-                return;
-            }
-
-            foreach (var camera in m_registeredCameras)
-            {
-                if (camera == null)
-                {
-                    continue;
-                }
-
-                s_removeCaptureActionMethod.Invoke(null, new object[] { camera, m_captureAction });
-            }
-
-            m_registeredCameras.Clear();
-        }
-
-        private void CaptureFrame(RenderTargetIdentifier source, CommandBuffer cmd)
-        {
-            if (m_captureRT == null || m_copyMaterial == null)
-            {
-                return;
-            }
-
-            if (source == BuiltinRenderTextureType.CurrentActive)
-            {
-                int tempId = Shader.PropertyToID("_PilotCaptureTempRT");
-                cmd.GetTemporaryRT(tempId, m_captureRT.width, m_captureRT.height, 0, FilterMode.Bilinear);
-                cmd.Blit(source, tempId);
-                cmd.Blit(tempId, new RenderTargetIdentifier(m_captureRT), m_copyMaterial);
-                cmd.ReleaseTemporaryRT(tempId);
-                return;
-            }
-
-            cmd.Blit(source, new RenderTargetIdentifier(m_captureRT), m_copyMaterial);
         }
 
         private static RenderTexture CreateRT(int maxDimension)
@@ -175,20 +94,6 @@ namespace Pilot.SDK
             // Ensure even dimensions for video encoding.
             width = Mathf.Max(2, (width / 2) * 2);
             height = Mathf.Max(2, (height / 2) * 2);
-        }
-
-        private static Material CreateCopyMaterial()
-        {
-            Shader shader = Shader.Find("Hidden/Pilot/CaptureCopy");
-            if (shader == null)
-            {
-                PilotLog.Warn("Pilot capture shader not found.");
-                return null;
-            }
-
-            var material = new Material(shader);
-            material.hideFlags = HideFlags.HideAndDontSave;
-            return material;
         }
     }
 }
