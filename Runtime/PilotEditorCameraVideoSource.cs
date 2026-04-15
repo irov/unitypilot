@@ -5,6 +5,7 @@ using System.Reflection;
 using LiveKit;
 using UnityEngine;
 using UnityEngine.Experimental.Rendering;
+using UnityEngine.Rendering;
 
 namespace Pilot.SDK
 {
