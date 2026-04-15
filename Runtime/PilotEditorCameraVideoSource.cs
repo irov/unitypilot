@@ -10,17 +10,20 @@ using UnityEngine.Rendering;
 namespace Pilot.SDK
 {
     /// <summary>
-    /// Uses a manually rendered game camera to feed frames into LiveKit.
-    /// Avoids Simulator chrome by rendering a specific game camera.
-    /// Uses synchronous ReadPixels instead of AsyncGPUReadback to avoid
-    /// readback callbacks silently stopping in the Editor.
+    /// Editor-only video source that captures a specific game camera via Camera.Render(),
+    /// avoiding Device Simulator / Editor chrome.
+    ///
+    /// Inherits from ScreenVideoSource (like the device path) and mirrors its ReadBuffer
+    /// pattern exactly: try/catch, async readback from RenderTexture, RT release after send.
     /// </summary>
-    internal sealed class PilotEditorCameraVideoSource : TextureVideoSource
+    internal sealed class PilotEditorCameraVideoSource : ScreenVideoSource
     {
         private static readonly PropertyInfo s_renderTypeProp;
 
-        private readonly RenderTexture m_cameraRT;
-        private readonly RenderTexture m_outputRT;
+        private readonly int m_maxDimension;
+        private TextureFormat m_textureFormat;
+        private RenderTexture m_cameraRT;
+        private RenderTexture m_readRT;
         private Camera m_baseCamera;
 
         static PilotEditorCameraVideoSource()
@@ -34,11 +37,23 @@ namespace Pilot.SDK
             }
         }
 
-        internal PilotEditorCameraVideoSource(int maxDimension)
-            : base(CreateOutputRT(maxDimension))
+        internal PilotEditorCameraVideoSource(int maxDimension) : base()
         {
-            m_outputRT = (RenderTexture)Texture;
-            m_cameraRT = CreateCameraRT(maxDimension);
+            m_maxDimension = maxDimension;
+        }
+
+        public override int GetWidth()
+        {
+            int width, height;
+            ComputeDimensions(m_maxDimension, out width, out height);
+            return width;
+        }
+
+        public override int GetHeight()
+        {
+            int width, height;
+            ComputeDimensions(m_maxDimension, out width, out height);
+            return height;
         }
 
         public override void Stop()
@@ -48,16 +63,12 @@ namespace Pilot.SDK
             if (m_cameraRT != null)
             {
                 m_cameraRT.Release();
+                m_cameraRT = null;
             }
 
-            if (m_outputRT != null)
-            {
-                m_outputRT.Release();
-            }
+            ClearReadRT();
         }
 
-        // Bypass TextureVideoSource.ReadBuffer (AsyncGPUReadback) entirely.
-        // Do synchronous Camera.Render → Blit → ReadPixels → copy to _captureBuffer.
         protected override bool ReadBuffer()
         {
             if (_reading)
@@ -65,61 +76,112 @@ namespace Pilot.SDK
                 return false;
             }
 
-            var baseCamera = ResolveBaseCamera();
-            if (baseCamera == null)
-            {
-                return false;
-            }
-
             _reading = true;
             var textureChanged = false;
 
-            // Ensure preview texture and native buffer exist
-            if (_previewTexture == null || _previewTexture.width != GetWidth() || _previewTexture.height != GetHeight())
+            try
             {
-                var compatibleFormat = SystemInfo.GetCompatibleFormat(m_outputRT.graphicsFormat, FormatUsage.ReadPixels);
-                var textureFormat = GraphicsFormatUtility.GetTextureFormat(compatibleFormat);
-                _bufferType = GetVideoBufferType(textureFormat);
-
-                if (_captureBuffer.IsCreated)
+                var cam = ResolveBaseCamera();
+                if (cam == null)
                 {
-                    _captureBuffer.Dispose();
+                    _reading = false;
+                    return false;
                 }
 
-                _captureBuffer = new NativeArray<byte>(GetWidth() * GetHeight() * GetStrideForBuffer(_bufferType), Allocator.Persistent);
-
-                if (_previewTexture != null)
+                // Recreate readback RT if needed (matches ScreenVideoSource pattern)
+                if (m_readRT == null || m_readRT.width != GetWidth() || m_readRT.height != GetHeight())
                 {
-                    UnityEngine.Object.Destroy(_previewTexture);
+                    ClearReadRT();
+
+                    var targetFormat = GetGraphicsFormat();
+                    var compatibleFormat = SystemInfo.GetCompatibleFormat(targetFormat, FormatUsage.ReadPixels);
+                    m_textureFormat = GraphicsFormatUtility.GetTextureFormat(compatibleFormat);
+                    _bufferType = GetVideoBufferType(m_textureFormat);
+                    m_readRT = new RenderTexture(GetWidth(), GetHeight(), 0, compatibleFormat);
+
+                    if (_captureBuffer.IsCreated)
+                    {
+                        _captureBuffer.Dispose();
+                    }
+
+                    _captureBuffer = new NativeArray<byte>(
+                        GetWidth() * GetHeight() * GetStrideForBuffer(_bufferType),
+                        Allocator.Persistent);
+
+                    if (_previewTexture != null)
+                    {
+                        UnityEngine.Object.Destroy(_previewTexture);
+                    }
+
+                    _previewTexture = new Texture2D(GetWidth(), GetHeight(), m_textureFormat, false);
+                    textureChanged = true;
                 }
 
-                _previewTexture = new Texture2D(GetWidth(), GetHeight(), textureFormat, false);
-                textureChanged = true;
+                // Ensure camera RT exists
+                if (m_cameraRT == null || m_cameraRT.width != GetWidth() || m_cameraRT.height != GetHeight())
+                {
+                    if (m_cameraRT != null)
+                    {
+                        m_cameraRT.Release();
+                    }
+
+                    m_cameraRT = new RenderTexture(GetWidth(), GetHeight(), 24, m_readRT.graphicsFormat);
+                    m_cameraRT.name = "PilotEditorCameraRT";
+                    m_cameraRT.Create();
+                }
+
+                // Camera.Render → cameraRT
+                var prevTarget = cam.targetTexture;
+                cam.targetTexture = m_cameraRT;
+                cam.Render();
+                cam.targetTexture = prevTarget;
+
+                // Flip Y → readRT
+                Graphics.Blit(m_cameraRT, m_readRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
+
+                // Copy for preview + async readback from RT (same as ScreenVideoSource)
+                Graphics.CopyTexture(m_readRT, _previewTexture);
+                AsyncGPUReadback.RequestIntoNativeArray(
+                    ref _captureBuffer, m_readRT, 0, m_textureFormat, OnReadback);
+            }
+            catch (Exception e)
+            {
+                PilotLog.Error("PilotEditorCameraVideoSource ReadBuffer failed", e);
+                _reading = false;
             }
 
-            // Render camera → cameraRT
-            var previousTarget = baseCamera.targetTexture;
-            baseCamera.targetTexture = m_cameraRT;
-            baseCamera.Render();
-            baseCamera.targetTexture = previousTarget;
-
-            // Flip Y → outputRT
-            Graphics.Blit(m_cameraRT, m_outputRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
-
-            // Synchronous readback: outputRT → previewTexture → captureBuffer
-            var prevActive = RenderTexture.active;
-            RenderTexture.active = m_outputRT;
-            _previewTexture.ReadPixels(new Rect(0, 0, GetWidth(), GetHeight()), 0, 0, false);
-            _previewTexture.Apply(false);
-            RenderTexture.active = prevActive;
-
-            var raw = _previewTexture.GetRawTextureData<byte>();
-            NativeArray<byte>.Copy(raw, _captureBuffer, raw.Length);
-
-            // Signal SendFrame() that data is ready
-            _requestPending = true;
-
             return textureChanged;
+        }
+
+        protected override bool SendFrame()
+        {
+            try
+            {
+                var result = base.SendFrame();
+
+                if (result)
+                {
+                    ClearReadRT();
+                }
+
+                return result;
+            }
+            catch (Exception e)
+            {
+                PilotLog.Error("PilotEditorCameraVideoSource SendFrame failed", e);
+                _reading = false;
+                _requestPending = false;
+                return false;
+            }
+        }
+
+        private void ClearReadRT()
+        {
+            if (m_readRT != null)
+            {
+                m_readRT.Release();
+                m_readRT = null;
+            }
         }
 
         private Camera ResolveBaseCamera()
@@ -157,33 +219,6 @@ namespace Pilot.SDK
 
             m_baseCamera = fallback ?? Camera.main;
             return m_baseCamera;
-        }
-
-        private static RenderTexture CreateCameraRT(int maxDimension)
-        {
-            int width, height;
-            ComputeDimensions(maxDimension, out width, out height);
-            return CreateRT("PilotEditorCameraRT", width, height, 24);
-        }
-
-        private static RenderTexture CreateOutputRT(int maxDimension)
-        {
-            int width, height;
-            ComputeDimensions(maxDimension, out width, out height);
-            return CreateRT("PilotEditorOutputRT", width, height, 0);
-        }
-
-        private static RenderTexture CreateRT(string name, int width, int height, int depth)
-        {
-            var targetFormat = GetGraphicsFormat();
-            var compatibleFormat = SystemInfo.GetCompatibleFormat(targetFormat, FormatUsage.ReadPixels);
-            var rt = new RenderTexture(width, height, depth, compatibleFormat);
-            rt.name = name;
-            rt.filterMode = FilterMode.Bilinear;
-            rt.useMipMap = false;
-            rt.autoGenerateMips = false;
-            rt.Create();
-            return rt;
         }
 
         private static void ComputeDimensions(int maxDimension, out int width, out int height)

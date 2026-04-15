@@ -1,6 +1,6 @@
 {
   "name": "com.pilot.sdk",
-  "version": "1.0.24",
+  "version": "1.0.25",
   "displayName": "Pilot SDK",
   "description": "Remote debug panel, logging, metrics, and live streaming for Unity applications.",
   "unity": "2020.3",
