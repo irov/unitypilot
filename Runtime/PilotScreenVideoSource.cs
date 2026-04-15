@@ -23,7 +23,8 @@ namespace Pilot.SDK
 
 #if UNITY_EDITOR
         private TextureFormat m_editorTextureFormat;
-        private RenderTexture m_editorRT;
+        private RenderTexture m_editorCameraRT;
+        private RenderTexture m_editorFlippedRT;
 
         private static readonly PropertyInfo s_renderTypeProp;
 
@@ -64,10 +65,16 @@ namespace Pilot.SDK
         {
             base.Stop();
 
-            if (m_editorRT != null)
+            if (m_editorCameraRT != null)
             {
-                m_editorRT.Release();
-                m_editorRT = null;
+                m_editorCameraRT.Release();
+                m_editorCameraRT = null;
+            }
+
+            if (m_editorFlippedRT != null)
+            {
+                m_editorFlippedRT.Release();
+                m_editorFlippedRT = null;
             }
         }
 
@@ -94,18 +101,24 @@ namespace Pilot.SDK
                 int w = GetWidth();
                 int h = GetHeight();
 
-                if (m_editorRT == null || m_editorRT.width != w || m_editorRT.height != h)
+                if (m_editorCameraRT == null || m_editorCameraRT.width != w || m_editorCameraRT.height != h)
                 {
-                    if (m_editorRT != null)
+                    if (m_editorCameraRT != null)
                     {
-                        m_editorRT.Release();
+                        m_editorCameraRT.Release();
+                    }
+
+                    if (m_editorFlippedRT != null)
+                    {
+                        m_editorFlippedRT.Release();
                     }
 
                     var targetFormat = GetEditorGraphicsFormat();
                     var compatibleFormat = SystemInfo.GetCompatibleFormat(targetFormat, FormatUsage.ReadPixels);
                     m_editorTextureFormat = GraphicsFormatUtility.GetTextureFormat(compatibleFormat);
                     _bufferType = GetVideoBufferType(m_editorTextureFormat);
-                    m_editorRT = new RenderTexture(w, h, 24, compatibleFormat);
+                    m_editorCameraRT = new RenderTexture(w, h, 24, compatibleFormat);
+                    m_editorFlippedRT = new RenderTexture(w, h, 0, compatibleFormat);
 
                     if (_captureBuffer.IsCreated)
                     {
@@ -123,14 +136,18 @@ namespace Pilot.SDK
                     textureChanged = true;
                 }
 
+                // Render camera stack into RT
                 var prevTarget = baseCamera.targetTexture;
-                baseCamera.targetTexture = m_editorRT;
+                baseCamera.targetTexture = m_editorCameraRT;
                 baseCamera.Render();
                 baseCamera.targetTexture = prevTarget;
 
-                Graphics.CopyTexture(m_editorRT, _previewTexture);
+                // Flip vertically — Camera.Render() output is Y-flipped on D3D
+                Graphics.Blit(m_editorCameraRT, m_editorFlippedRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
+
+                Graphics.CopyTexture(m_editorFlippedRT, _previewTexture);
                 AsyncGPUReadback.RequestIntoNativeArray(
-                    ref _captureBuffer, m_editorRT, 0, m_editorTextureFormat, OnReadback);
+                    ref _captureBuffer, m_editorFlippedRT, 0, m_editorTextureFormat, OnReadback);
             }
             catch (Exception e)
             {
