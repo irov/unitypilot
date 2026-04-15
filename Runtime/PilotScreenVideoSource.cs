@@ -29,12 +29,14 @@ namespace Pilot.SDK
         private readonly RenderTexture m_captureRT;
         private readonly HashSet<Camera> m_registeredCameras = new HashSet<Camera>();
         private readonly Action<RenderTargetIdentifier, CommandBuffer> m_captureAction;
+        private readonly Material m_copyMaterial;
 
         internal PilotScreenVideoSource(int maxDimension)
             : base(CreateRT(maxDimension))
         {
             m_captureRT = (RenderTexture)Texture;
             m_captureAction = CaptureFrame;
+            m_copyMaterial = CreateCopyMaterial();
 
             RefreshRegisteredCameras();
 
@@ -53,6 +55,11 @@ namespace Pilot.SDK
             if (m_captureRT != null)
             {
                 m_captureRT.Release();
+            }
+
+            if (m_copyMaterial != null)
+            {
+                UnityEngine.Object.Destroy(m_copyMaterial);
             }
         }
 
@@ -74,9 +81,14 @@ namespace Pilot.SDK
                 return;
             }
 
-            foreach (var camera in Camera.allCameras)
+            foreach (var camera in Resources.FindObjectsOfTypeAll<Camera>())
             {
                 if (camera == null || camera.cameraType != CameraType.Game)
+                {
+                    continue;
+                }
+
+                if (!camera.gameObject.scene.IsValid())
                 {
                     continue;
                 }
@@ -113,12 +125,22 @@ namespace Pilot.SDK
 
         private void CaptureFrame(RenderTargetIdentifier source, CommandBuffer cmd)
         {
-            if (m_captureRT == null)
+            if (m_captureRT == null || m_copyMaterial == null)
             {
                 return;
             }
 
-            cmd.Blit(source, new RenderTargetIdentifier(m_captureRT));
+            if (source == BuiltinRenderTextureType.CurrentActive)
+            {
+                int tempId = Shader.PropertyToID("_PilotCaptureTempRT");
+                cmd.GetTemporaryRT(tempId, m_captureRT.width, m_captureRT.height, 0, FilterMode.Bilinear);
+                cmd.Blit(source, tempId);
+                cmd.Blit(tempId, new RenderTargetIdentifier(m_captureRT), m_copyMaterial);
+                cmd.ReleaseTemporaryRT(tempId);
+                return;
+            }
+
+            cmd.Blit(source, new RenderTargetIdentifier(m_captureRT), m_copyMaterial);
         }
 
         private static RenderTexture CreateRT(int maxDimension)
@@ -153,6 +175,20 @@ namespace Pilot.SDK
             // Ensure even dimensions for video encoding.
             width = Mathf.Max(2, (width / 2) * 2);
             height = Mathf.Max(2, (height / 2) * 2);
+        }
+
+        private static Material CreateCopyMaterial()
+        {
+            Shader shader = Shader.Find("Hidden/Pilot/CaptureCopy");
+            if (shader == null)
+            {
+                PilotLog.Warn("Pilot capture shader not found.");
+                return null;
+            }
+
+            var material = new Material(shader);
+            material.hideFlags = HideFlags.HideAndDontSave;
+            return material;
         }
     }
 }
