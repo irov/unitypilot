@@ -145,18 +145,9 @@ namespace Pilot.SDK
                 // Flip vertically — Camera.Render() output is Y-flipped on D3D
                 Graphics.Blit(m_editorCameraRT, m_editorFlippedRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
 
-                // Synchronous readback — reliable in Editor unlike AsyncGPUReadback after Camera.Render
-                var prevActive = RenderTexture.active;
-                RenderTexture.active = m_editorFlippedRT;
-                _previewTexture.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
-                _previewTexture.Apply(false, false);
-                RenderTexture.active = prevActive;
-
-                // Copy pixel data into capture buffer for WebRTC
-                var raw = _previewTexture.GetRawTextureData<byte>();
-                NativeArray<byte>.Copy(raw, _captureBuffer, raw.Length);
-
-                _requestPending = true;
+                Graphics.CopyTexture(m_editorFlippedRT, _previewTexture);
+                AsyncGPUReadback.RequestIntoNativeArray(
+                    ref _captureBuffer, m_editorFlippedRT, 0, m_editorTextureFormat, OnReadback);
             }
             catch (Exception e)
             {
