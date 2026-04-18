@@ -10,29 +10,31 @@ using UnityEngine.Rendering;
 namespace Pilot.SDK
 {
     /// <summary>
-    /// Editor-only video source. Hooks RenderPipelineManager.endCameraRendering to capture
-    /// the URP base camera's output AFTER URP has rendered it (so we get real scene content,
-    /// not just clear color). Then streams via LiveKit ScreenVideoSource pipeline.
+    /// Editor-only video source. Creates a hidden clone camera that mirrors the URP base
+    /// camera and renders to our RenderTexture every frame. URP renders this clone as part
+    /// of its normal pipeline, so we get full scene content without Editor/Simulator chrome.
     /// </summary>
     internal sealed class PilotEditorCameraVideoSource : ScreenVideoSource
     {
         private static readonly PropertyInfo s_renderTypeProp;
+        private static readonly Type s_urpCameraDataType;
 
         private readonly int m_maxDimension;
         private TextureFormat m_textureFormat;
         private RenderTexture m_captureRT;
-        private long m_capturedFrames;
+        private Camera m_cloneCamera;
+        private GameObject m_cloneGO;
+        private Camera m_baseCamera;
         private long m_readbackOk;
         private long m_readbackErr;
         private long m_lastLogged;
-        private bool m_subscribed;
 
         static PilotEditorCameraVideoSource()
         {
-            var urpCameraDataType = Type.GetType(
+            s_urpCameraDataType = Type.GetType(
                 "UnityEngine.Rendering.Universal.UniversalAdditionalCameraData, Unity.RenderPipelines.Universal.Runtime");
-            if (urpCameraDataType != null)
-                s_renderTypeProp = urpCameraDataType.GetProperty("renderType");
+            if (s_urpCameraDataType != null)
+                s_renderTypeProp = s_urpCameraDataType.GetProperty("renderType");
         }
 
         internal PilotEditorCameraVideoSource(int maxDimension) : base()
@@ -48,79 +50,28 @@ namespace Pilot.SDK
         public override void Start()
         {
             base.Start();
-            if (!m_subscribed)
-            {
-                RenderPipelineManager.endCameraRendering += OnEndCameraRendering;
-                m_subscribed = true;
-            }
             PilotLog.Info("PilotEditorCameraVideoSource.Start playing=" + _playing);
         }
 
         public override void Stop()
         {
-            if (m_subscribed)
-            {
-                RenderPipelineManager.endCameraRendering -= OnEndCameraRendering;
-                m_subscribed = false;
-            }
-            PilotLog.Info("PilotEditorCameraVideoSource.Stop captured=" + m_capturedFrames
-                + " readbackOk=" + m_readbackOk + " readbackErr=" + m_readbackErr);
+            PilotLog.Info("PilotEditorCameraVideoSource.Stop readbackOk=" + m_readbackOk + " readbackErr=" + m_readbackErr);
             base.Stop();
+            DestroyClone();
             if (m_captureRT != null) { m_captureRT.Release(); m_captureRT = null; }
-        }
-
-        // Called by URP after each camera finishes rendering to its target.
-        private void OnEndCameraRendering(ScriptableRenderContext ctx, Camera cam)
-        {
-            if (!_playing || cam == null) return;
-            if (cam.cameraType != CameraType.Game) return;
-
-            // Only capture the URP BASE camera (renderType==0). Skip overlays.
-            if (s_renderTypeProp != null)
-            {
-                var data = cam.GetComponent("UniversalAdditionalCameraData");
-                if (data != null)
-                {
-                    int rt = (int)s_renderTypeProp.GetValue(data);
-                    if (rt != 0) return;
-                }
-            }
-
-            try
-            {
-                int w = GetWidth();
-                int h = GetHeight();
-                EnsureCaptureRT(w, h);
-                // The camera has just rendered to screen. ScreenCapture is not safe here,
-                // but we can blit from the active backbuffer via a temporary RT bound to the camera.
-                // Instead, use Graphics.Blit from the camera's targetTexture if set, otherwise
-                // copy the current RenderTexture.active.
-                var src = cam.activeTexture;
-                if (src != null)
-                {
-                    Graphics.Blit(src, m_captureRT, new Vector2(1f, -1f), new Vector2(0f, 1f));
-                    m_capturedFrames++;
-                }
-            }
-            catch (Exception e)
-            {
-                PilotLog.Error("OnEndCameraRendering failed: " + e.Message);
-            }
         }
 
         protected override bool ReadBuffer()
         {
-            if (m_capturedFrames - m_lastLogged >= 60)
+            if (m_readbackOk - m_lastLogged >= 60)
             {
-                m_lastLogged = m_capturedFrames;
-                PilotLog.Info("Pilot heartbeat: captured=" + m_capturedFrames
+                m_lastLogged = m_readbackOk;
+                PilotLog.Info("Pilot heartbeat: readbackOk=" + m_readbackOk + " readbackErr=" + m_readbackErr
                     + " reading=" + _reading + " pending=" + _requestPending
-                    + " readbackOk=" + m_readbackOk + " readbackErr=" + m_readbackErr);
+                    + " clone=" + (m_cloneCamera != null));
             }
 
             if (_reading) return false;
-            if (m_captureRT == null) return false;
-
             _reading = true;
             var textureChanged = false;
 
@@ -128,6 +79,8 @@ namespace Pilot.SDK
             {
                 int w = GetWidth();
                 int h = GetHeight();
+                EnsureCaptureRT(w, h);
+                EnsureCloneCamera();
 
                 if (_previewTexture == null || _previewTexture.width != w || _previewTexture.height != h)
                 {
@@ -152,16 +105,8 @@ namespace Pilot.SDK
 
         private void OnReadbackTracked(AsyncGPUReadbackRequest req)
         {
-            if (req.hasError)
-            {
-                m_readbackErr++;
-                _reading = false;
-            }
-            else
-            {
-                m_readbackOk++;
-                _requestPending = true;
-            }
+            if (req.hasError) { m_readbackErr++; _reading = false; }
+            else { m_readbackOk++; _requestPending = true; }
         }
 
         protected override bool SendFrame()
@@ -170,8 +115,7 @@ namespace Pilot.SDK
             catch (Exception e)
             {
                 PilotLog.Error("SendFrame failed: " + e.Message);
-                _reading = false;
-                _requestPending = false;
+                _reading = false; _requestPending = false;
                 return false;
             }
         }
@@ -184,10 +128,89 @@ namespace Pilot.SDK
             var compatibleFormat = SystemInfo.GetCompatibleFormat(targetFormat, FormatUsage.ReadPixels);
             m_textureFormat = GraphicsFormatUtility.GetTextureFormat(compatibleFormat);
             _bufferType = GetVideoBufferType(m_textureFormat);
-            m_captureRT = new RenderTexture(w, h, 0, compatibleFormat);
+            m_captureRT = new RenderTexture(w, h, 24, compatibleFormat);
             m_captureRT.name = "PilotEditorCaptureRT";
             m_captureRT.Create();
             PilotLog.Info("Created captureRT " + w + "x" + h + " format=" + m_textureFormat);
+
+            // Update existing clone targetTexture if camera was already created.
+            if (m_cloneCamera != null) m_cloneCamera.targetTexture = m_captureRT;
+        }
+
+        private void EnsureCloneCamera()
+        {
+            var baseCam = ResolveBaseCamera();
+            if (baseCam == null) return;
+
+            // Recreate clone if base camera changed or clone was destroyed.
+            if (m_cloneCamera == null || m_baseCamera != baseCam)
+            {
+                DestroyClone();
+                m_baseCamera = baseCam;
+
+                m_cloneGO = new GameObject("[PilotSDK_CaptureCamera]");
+                m_cloneGO.hideFlags = HideFlags.HideAndDontSave;
+                m_cloneGO.transform.SetParent(baseCam.transform, false);
+
+                m_cloneCamera = m_cloneGO.AddComponent<Camera>();
+                m_cloneCamera.CopyFrom(baseCam);
+                m_cloneCamera.targetTexture = m_captureRT;
+                m_cloneCamera.depth = baseCam.depth - 1; // render before main, doesn't matter
+                m_cloneCamera.enabled = true;
+
+                // Force URP to treat this as a Base camera (renderType=0) with no overlays.
+                if (s_urpCameraDataType != null)
+                {
+                    var data = m_cloneGO.GetComponent(s_urpCameraDataType)
+                        ?? m_cloneGO.AddComponent(s_urpCameraDataType);
+                    if (data != null && s_renderTypeProp != null && s_renderTypeProp.CanWrite)
+                    {
+                        s_renderTypeProp.SetValue(data, 0);
+                    }
+                }
+
+                PilotLog.Info("Created clone capture camera under '" + baseCam.name + "'");
+            }
+            else
+            {
+                // Keep clone synced (CopyFrom each frame is cheap and handles fov/clip changes)
+                m_cloneCamera.CopyFrom(baseCam);
+                m_cloneCamera.targetTexture = m_captureRT;
+                m_cloneCamera.enabled = true;
+            }
+        }
+
+        private void DestroyClone()
+        {
+            if (m_cloneCamera != null) m_cloneCamera.targetTexture = null;
+            if (m_cloneGO != null)
+            {
+                UnityEngine.Object.DestroyImmediate(m_cloneGO);
+                m_cloneGO = null;
+                m_cloneCamera = null;
+            }
+            m_baseCamera = null;
+        }
+
+        private Camera ResolveBaseCamera()
+        {
+            Camera fallback = null;
+            foreach (var cam in Camera.allCameras)
+            {
+                if (cam == m_cloneCamera) continue;
+                if (cam.cameraType != CameraType.Game || !cam.isActiveAndEnabled) continue;
+                fallback = cam;
+                if (s_renderTypeProp != null)
+                {
+                    var data = cam.GetComponent("UniversalAdditionalCameraData");
+                    if (data != null)
+                    {
+                        int rt = (int)s_renderTypeProp.GetValue(data);
+                        if (rt == 0) return cam;
+                    }
+                }
+            }
+            return fallback ?? Camera.main;
         }
 
         private static void ComputeDimensions(int maxDimension, out int width, out int height)
